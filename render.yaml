@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: jee-test-app
+    env: node
+    plan: free
+    buildCommand: apt-get install -y poppler-utils && npm run render-build
+    startCommand: npm start
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: NODE_VERSION
+        value: 20
