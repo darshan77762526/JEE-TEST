@@ -550,16 +550,24 @@ app.post("/api/parse-pdf", async (req, res) => {
     const seen = new Map(); // normalized text -> index of kept question
     const result = [];
     for (const q of questions) {
-      // Normalize: lowercase, strip whitespace and punctuation for comparison
-      const norm = (q.text || "").toLowerCase().replace(/\s+/g, " ").replace(/[^\w\s]/g, "").trim().slice(0, 80);
+      // Normalize: lowercase, remove LaTeX artifacts like "text " from \text, strip spaces/punctuation
+      const norm = (q.text || "")
+        .toLowerCase()
+        .replace(/\\text\s*/g, "")   // remove \text commands
+        .replace(/\btext\s+/g, "")   // remove "text " word artifacts from bad LaTeX parsing
+        .replace(/\[figure[^\]]*\]/gi, "") // ignore figure placeholders
+        .replace(/\s+/g, " ")
+        .replace(/[^\w\s]/g, "")
+        .trim()
+        .slice(0, 100);
       if (!norm) { result.push(q); continue; }
       if (seen.has(norm)) {
         // Keep the version that has a figure (more complete)
         const existingIdx = seen.get(norm);
         if (q.hasFigure && !result[existingIdx].hasFigure) {
-          result[existingIdx] = q; // replace with the richer version
+          result[existingIdx] = q;
         }
-        // otherwise discard this duplicate
+        // discard duplicate
       } else {
         seen.set(norm, result.length);
         result.push(q);
