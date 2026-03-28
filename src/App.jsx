@@ -1255,6 +1255,7 @@ function AdminScreen({ user, tests, onSaveTests, onLogout, serverReady }) {
    in the question object. This way images are always available.
 ───────────────────────────────────────────── */
 async function embedFigureImages(questions, pdfBase64, onProgress) {
+  // Step 1: For questions with figurePageNumber but no figureRegion, try auto-detecting the region
   const questionsNeedingDetection = questions.filter(
     q => q.hasFigure && q.figurePageNumber && !q.figureRegion
   );
@@ -1293,11 +1294,34 @@ async function embedFigureImages(questions, pdfBase64, onProgress) {
     }));
   }
 
-  const CENTER_STRIP = { top: 35, bottom: 80, left: 0, right: 100 };
+  // Step 2: Deduplicate questions that appear to be the same (same text + same page)
+  // This prevents the same figure from showing up multiple times due to PDF parsing repeats
+  const seen = new Set();
+  questions = questions.filter(q => {
+    const key = `${q.figurePageNumber}:${q.text?.slice(0,50)}`;
+    if (q.hasFigure && seen.has(key)) return false;
+    if (q.hasFigure) seen.add(key);
+    return true;
+  });
+
+  // Step 3: Build crop jobs — use figureRegion if available, else skip (don't show bad full-page crops)
+  // Only use CENTER_STRIP as last resort, and only if figureRegion seems valid
   const jobMap = {};
   questions.forEach(q => {
     if (!q.hasFigure || !q.figurePageNumber) return;
-    const r = q.figureRegion || CENTER_STRIP;
+    
+    let r = q.figureRegion;
+    
+    // Validate region: reject if it covers >80% of page height (too big, likely wrong)
+    if (r && (r.bottom - r.top) > 80) r = null;
+    
+    // If no valid region from Gemini detection, use a tighter center-of-page strip
+    // This avoids showing the entire PDF page
+    if (!r) {
+      // Don't embed figure if we can't get a good crop — show placeholder instead
+      return;
+    }
+    
     const key = `${q.figurePageNumber}:${r.top}:${r.bottom}:${r.left ?? 0}:${r.right ?? 100}`;
     if (!jobMap[key]) jobMap[key] = { page: q.figurePageNumber, cropRegion: r };
   });
@@ -1327,7 +1351,8 @@ async function embedFigureImages(questions, pdfBase64, onProgress) {
 
   return questions.map(q => {
     if (!q.hasFigure || !q.figurePageNumber) return q;
-    const r = q.figureRegion || CENTER_STRIP;
+    const r = q.figureRegion;
+    if (!r || (r.bottom - r.top) > 80) return q; // no valid region → keep placeholder
     const key = `${q.figurePageNumber}:${r.top}:${r.bottom}:${r.left ?? 0}:${r.right ?? 100}`;
     if (imageCache[key]) return { ...q, figureImageData: imageCache[key] };
     return q;
@@ -1382,11 +1407,14 @@ async function embedFigureImages(questions, pdfBase64, onProgress) {
           }
           const allQs = [];
           let globalId = 1;
+          // Track each section's PDF base64 so figures can be fetched from the correct PDF
+          const sectionPdfs = {}; // subject -> base64
           for (const sec of enabledSections) {
             if (!sec.file) { setMsg(`⚠️ ${sec.subject} PDF not uploaded — skipping`, "warning"); continue; }
             setMsg(`📄 Extracting ${sec.subject} questions... (${enabledSections.indexOf(sec)+1}/${enabledSections.length})`, "info");
             try {
               const b64 = await toBase64(sec.file);
+              sectionPdfs[sec.subject] = b64;
               window.__pdfBase64 = b64;
               const res = await parsePDF(b64, false, savedModel);
               if (res?.questions?.length) {
@@ -1405,11 +1433,24 @@ async function embedFigureImages(questions, pdfBase64, onProgress) {
           questions = allQs;
           geminiUsed = true;
           setMsg(`✅ All sections done! Now loading diagrams...`, "info");
-          if (window.__pdfBase64) {
-            questions = await embedFigureImages(questions, window.__pdfBase64, (done, total) => {
-              setMsg(`🖼️ Loading diagram images... (${done}/${total})`, "info");
-            });
-          }
+          // Embed figures per-subject using the correct PDF for each subject
+          let figDone = 0;
+          const figTotal = questions.filter(q => q.hasFigure && q.figurePageNumber).length;
+          const bySubject = {};
+          questions.forEach(q => { if (!bySubject[q.subject]) bySubject[q.subject] = []; bySubject[q.subject].push(q); });
+          const embeddedBySubject = await Promise.all(
+            Object.entries(bySubject).map(async ([subj, qs]) => {
+              const pdf = sectionPdfs[subj];
+              if (!pdf) return qs;
+              return embedFigureImages(qs, pdf, (d) => {
+                figDone += d;
+                setMsg(`🖼️ Loading diagram images... (${figDone}/${figTotal})`, "info");
+              });
+            })
+          );
+          questions = embeddedBySubject.flat();
+          // Restore original order (by id)
+          questions.sort((a, b) => (a.id || 0) - (b.id || 0));
           setMsg(`✅ All sections done! Total: ${questions.length} questions`, "success");
         } else if (paperFile) {
           setMsg("📄 Converting PDF to base64...", "info");
