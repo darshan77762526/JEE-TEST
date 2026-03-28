@@ -454,17 +454,17 @@ FIGURE HANDLING — THIS IS CRITICAL:
 When a question or its options contain a diagram, graph, circuit, or any visual figure:
 - Set "hasFigure": true
 - Set "figurePageNumber": the PDF page number (integer) where the figure appears
-- Set "figureRegion": an object {"top": T, "bottom": B} where T and B are the percentage (0-100) of the page height where the figure starts and ends. E.g. if the figure occupies from 35% to 65% of the page, set {"top": 35, "bottom": 65}. Be precise — this is used to crop the image to show only the diagram.
+- Set "figureRegion": an object {"top": T, "bottom": B, "left": L, "right": R} where values are percentages (0-100) of page dimensions. Be VERY TIGHT — crop only the actual drawing, NOT surrounding text or other questions. Typical figure region is 10-30% of page height. NEVER set top:0,bottom:100 or a range larger than 50% of the page height unless it is truly a very large diagram that fills half the page.
 - In the question "text", write [FIGURE] as a placeholder at the position of the diagram
 - For MCQ options that are themselves diagrams (e.g. "which graph is correct?"):
   write "[FIGURE_A]", "[FIGURE_B]", "[FIGURE_C]", "[FIGURE_D]" in the options array
 - Do NOT describe the diagram in words — just mark the page number and region
 
 Example (figure in question body):
-{"id":5,"subject":"${subject}","type":"mcq","text":"A block of mass 2kg is placed as shown. [FIGURE] Find the normal force.","options":["10N","20N","15N","25N"],"correct":1,"marks":4,"negative":-1,"hasFigure":true,"figurePageNumber":4,"figureRegion":{"top":40,"bottom":68}}
+{"id":5,"subject":"${subject}","type":"mcq","text":"A block of mass 2kg is placed as shown. [FIGURE] Find the normal force.","options":["10N","20N","15N","25N"],"correct":1,"marks":4,"negative":-1,"hasFigure":true,"figurePageNumber":4,"figureRegion":{"top":42,"bottom":58,"left":5,"right":60}}
 
 Example (options are graphs/diagrams):
-{"id":8,"subject":"${subject}","type":"mcq","text":"The velocity-time graph for the given motion is:","options":["[FIGURE_A]","[FIGURE_B]","[FIGURE_C]","[FIGURE_D]"],"correct":2,"marks":4,"negative":-1,"hasFigure":true,"figurePageNumber":6,"figureRegion":{"top":30,"bottom":75}}
+{"id":8,"subject":"${subject}","type":"mcq","text":"The velocity-time graph for the given motion is:","options":["[FIGURE_A]","[FIGURE_B]","[FIGURE_C]","[FIGURE_D]"],"correct":2,"marks":4,"negative":-1,"hasFigure":true,"figurePageNumber":6,"figureRegion":{"top":35,"bottom":72,"left":2,"right":98}}
 
 Return ONLY valid JSON:
 {"questions":[
@@ -479,7 +479,7 @@ RULES:
 - marks: 4, negative: -1 for MCQ, 0 for integer
 - hasFigure: true only when question has an actual visual element (not just symbols)
 - figurePageNumber: exact PDF page number as integer, or null
-- figureRegion: {"top": percentage, "bottom": percentage} where the figure is on the page, or null
+- figureRegion: TIGHT bounding box {"top","bottom","left","right"} as percentages. Height (bottom-top) must be LESS than 45% of page. Width (right-left) must be LESS than 95% of page. or null if no figure
 - Extract EVERY ${subject} question — do not skip any
 - Output ONLY the JSON object, no markdown`;
 }
@@ -500,14 +500,14 @@ function buildFullPrompt() {
 FIGURE HANDLING:
 - hasFigure: true when a visual diagram/graph/figure is present
 - figurePageNumber: exact PDF page number (integer) where the figure is
-- figureRegion: {"top": T, "bottom": B} where T and B are percentages (0-100) of the page height bounding the figure. E.g. {"top": 35, "bottom": 65}. Be precise.
+- figureRegion: TIGHT bounding box {"top": T, "bottom": B, "left": L, "right": R} as percentages (0-100) of page dimensions. Crop ONLY the actual drawing. Height (bottom-top) must be LESS than 45% of page. NEVER use top:0,bottom:100.
 - In text: write [FIGURE] where the diagram appears
 - Options that are diagrams: write "[FIGURE_A]","[FIGURE_B]","[FIGURE_C]","[FIGURE_D]"
 - Do NOT describe figures in words
 
 Return ONLY valid JSON:
 {"questions":[
-{"id":1,"subject":"Physics","type":"mcq","text":"text [FIGURE]","options":["A","B","C","D"],"correct":0,"marks":4,"negative":-1,"hasFigure":true,"figurePageNumber":3,"figureRegion":{"top":40,"bottom":68}},
+{"id":1,"subject":"Physics","type":"mcq","text":"text [FIGURE]","options":["A","B","C","D"],"correct":0,"marks":4,"negative":-1,"hasFigure":true,"figurePageNumber":3,"figureRegion":{"top":42,"bottom":58,"left":5,"right":60}},
 {"id":2,"subject":"Chemistry","type":"integer","text":"text","options":[],"correct":5,"marks":4,"negative":0,"hasFigure":false,"figurePageNumber":null,"figureRegion":null}
 ]}
 - subject: "Physics", "Chemistry", or "Mathematics" exactly
