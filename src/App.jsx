@@ -121,8 +121,10 @@ function renderMath(text) {
   s = s.replace(/\\langle/g,"⟨").replace(/\\rangle/g,"⟩");
   // Remove remaining braces used for grouping
   s = s.replace(/\{([^{}]*)\}/g,"$1");
-  // \text{...} → ...
+  // \text{...} → ...  (must come before the generic backslash cleanup)
   s = s.replace(/\\text\s*\{([^{}]*)\}/g,"$1");
+  // Also handle \text without braces followed by a word: \text kg → kg
+  s = s.replace(/\\text\s+(\S)/g,"$1");
   // Remove $ delimiters
   s = s.replace(/\$\$([^$]+)\$\$/g,"$1").replace(/\$([^$]+)\$/g,"$1");
   // Remove remaining lone backslash commands
@@ -1183,6 +1185,265 @@ function LoginScreen({ onLogin, tests, directTestId }) {
 }
 
 /* ════════════════════════════════════════════════════
+   TEST EDITOR VIEW — add/remove/edit questions
+════════════════════════════════════════════════════ */
+function TestEditorView({ test, onSave, onBack }) {
+  const [questions, setQuestions] = useState(() =>
+    (test.questions || []).map((q, i) => ({ ...q, _key: i }))
+  );
+  const [editIdx, setEditIdx] = useState(null); // index of question being edited
+  const [saved, setSaved] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(null); // index to delete
+
+  const SUBJECTS = ["Physics", "Chemistry", "Mathematics"];
+  const OPTION_LABELS = ["A", "B", "C", "D"];
+
+  const blankQuestion = () => ({
+    _key: Date.now(),
+    subject: questions[0]?.subject || "Physics",
+    type: "mcq",
+    text: "",
+    options: ["", "", "", ""],
+    correct: 0,
+    marks: 4,
+    negative: -1,
+    hasFigure: false,
+    figurePageNumber: null,
+    figureRegion: null,
+    figureImageData: null,
+  });
+
+  const addQuestion = () => {
+    const nq = blankQuestion();
+    setQuestions(qs => [...qs, nq]);
+    setEditIdx(questions.length);
+  };
+
+  const deleteQuestion = (idx) => {
+    setQuestions(qs => qs.filter((_, i) => i !== idx));
+    setConfirmDelete(null);
+    if (editIdx === idx) setEditIdx(null);
+    else if (editIdx > idx) setEditIdx(editIdx - 1);
+  };
+
+  const updateQuestion = (idx, patch) => {
+    setQuestions(qs => qs.map((q, i) => i === idx ? { ...q, ...patch } : q));
+  };
+
+  const moveQuestion = (idx, dir) => {
+    const newQs = [...questions];
+    const to = idx + dir;
+    if (to < 0 || to >= newQs.length) return;
+    [newQs[idx], newQs[to]] = [newQs[to], newQs[idx]];
+    setQuestions(newQs);
+    setEditIdx(to);
+  };
+
+  const handleSave = async () => {
+    const renumbered = questions.map((q, i) => {
+      const { _key, ...rest } = q;
+      return { ...rest, id: i + 1 };
+    });
+    await onSave(renumbered);
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2000);
+  };
+
+  const eq = editIdx !== null ? questions[editIdx] : null;
+
+  return (
+    <div>
+      {/* Header */}
+      <div style={{ display:"flex", alignItems:"center", gap:16, marginBottom:24, flexWrap:"wrap" }}>
+        <button onClick={onBack}
+          style={{ padding:"8px 16px", borderRadius:8, border:`1px solid ${DS.border}`, background:"white", color:DS.textSub, cursor:"pointer", fontSize:13, fontFamily:"inherit" }}>
+          ← Back
+        </button>
+        <div style={{ flex:1 }}>
+          <h1 style={{ margin:0, fontSize:22, fontWeight:700, color:DS.text, fontFamily:"'Space Grotesk', sans-serif" }}>Edit Test</h1>
+          <p style={{ margin:"3px 0 0", color:DS.textSub, fontSize:13 }}>{test.title} · {questions.length} questions</p>
+        </div>
+        <button onClick={addQuestion}
+          style={{ padding:"9px 20px", borderRadius:8, border:"none", background:"#10b981", color:"white", fontWeight:700, cursor:"pointer", fontSize:13, fontFamily:"inherit" }}>
+          + Add Question
+        </button>
+        <button onClick={handleSave}
+          style={{ padding:"9px 22px", borderRadius:8, border:"none", background:saved?"#10b981":"linear-gradient(135deg,#4f46e5,#7c3aed)", color:"white", fontWeight:700, cursor:"pointer", fontSize:13, fontFamily:"inherit" }}>
+          {saved ? "✅ Saved!" : "💾 Save Changes"}
+        </button>
+      </div>
+
+      <div style={{ display:"grid", gridTemplateColumns: eq ? "1fr 420px" : "1fr", gap:20, alignItems:"start" }}>
+
+        {/* Question list */}
+        <div style={{ background:DS.surface, borderRadius:DS.rXl, boxShadow:DS.shadow, border:`1px solid ${DS.border}`, overflow:"hidden" }}>
+          <div style={{ padding:"14px 20px", borderBottom:`1px solid ${DS.border}`, background:"#f8f9ff" }}>
+            <span style={{ fontWeight:700, fontSize:14, color:DS.text }}>Questions ({questions.length})</span>
+            <span style={{ fontSize:12, color:DS.textSub, marginLeft:12 }}>Click to edit · drag to reorder</span>
+          </div>
+          {questions.length === 0 && (
+            <div style={{ padding:"48px 0", textAlign:"center", color:DS.textMuted }}>
+              <div style={{ fontSize:36, marginBottom:8 }}>📭</div>
+              <div>No questions yet. Click "+ Add Question" to start.</div>
+            </div>
+          )}
+          {questions.map((q, idx) => {
+            const isEditing = editIdx === idx;
+            const subColor = q.subject==="Physics"?"#3b82f6":q.subject==="Chemistry"?"#22c55e":"#8b5cf6";
+            return (
+              <div key={q._key} style={{
+                padding:"12px 20px", borderBottom:`1px solid ${DS.border}`,
+                background: isEditing ? "#f0f4ff" : "white",
+                borderLeft: isEditing ? "3px solid #4f46e5" : "3px solid transparent",
+                cursor:"pointer", display:"flex", gap:12, alignItems:"flex-start",
+              }} onClick={() => setEditIdx(isEditing ? null : idx)}>
+                {/* Number */}
+                <div style={{ width:28, height:28, borderRadius:"50%", background:isEditing?"#4f46e5":"#f3f4f6", color:isEditing?"white":DS.textSub, display:"flex", alignItems:"center", justifyContent:"center", fontWeight:700, fontSize:12, flexShrink:0, marginTop:1 }}>
+                  {idx + 1}
+                </div>
+                <div style={{ flex:1, minWidth:0 }}>
+                  <div style={{ display:"flex", alignItems:"center", gap:6, marginBottom:3 }}>
+                    <span style={{ fontSize:10, color:subColor, background:subColor+"18", padding:"1px 7px", borderRadius:99, fontWeight:700 }}>{q.subject}</span>
+                    <span style={{ fontSize:10, color:DS.textMuted }}>{q.type === "integer" ? "Integer" : "MCQ"}</span>
+                    {q.hasFigure && <span style={{ fontSize:10, color:"#6366f1" }}>📊 Figure</span>}
+                  </div>
+                  <div style={{ fontSize:13, color:DS.text, lineHeight:1.5, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", maxWidth:"100%" }}>
+                    {q.text ? q.text.replace(/\[FIGURE[^\]]*\]/gi, "[diagram]") : <span style={{ color:DS.textMuted, fontStyle:"italic" }}>No question text</span>}
+                  </div>
+                </div>
+                {/* Move + delete buttons */}
+                <div style={{ display:"flex", flexDirection:"column", gap:3, flexShrink:0 }} onClick={e => e.stopPropagation()}>
+                  <button onClick={() => moveQuestion(idx, -1)} disabled={idx===0}
+                    style={{ padding:"2px 6px", borderRadius:4, border:`1px solid ${DS.border}`, background:"white", color:DS.textSub, cursor:idx===0?"default":"pointer", fontSize:11, opacity:idx===0?0.3:1 }}>↑</button>
+                  <button onClick={() => moveQuestion(idx, 1)} disabled={idx===questions.length-1}
+                    style={{ padding:"2px 6px", borderRadius:4, border:`1px solid ${DS.border}`, background:"white", color:DS.textSub, cursor:idx===questions.length-1?"default":"pointer", fontSize:11, opacity:idx===questions.length-1?0.3:1 }}>↓</button>
+                  <button onClick={() => setConfirmDelete(idx)}
+                    style={{ padding:"2px 6px", borderRadius:4, border:"1px solid #fecaca", background:"#fef2f2", color:"#b91c1c", cursor:"pointer", fontSize:11 }}>✕</button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Edit panel */}
+        {eq && (
+          <div style={{ background:DS.surface, borderRadius:DS.rXl, boxShadow:DS.shadow, border:`1px solid ${DS.border}`, padding:22, position:"sticky", top:20 }}>
+            <div style={{ fontWeight:700, fontSize:14, color:DS.text, marginBottom:16 }}>
+              Editing Q{editIdx + 1}
+              <button onClick={() => setEditIdx(null)} style={{ float:"right", border:"none", background:"none", color:DS.textMuted, cursor:"pointer", fontSize:18, lineHeight:1 }}>×</button>
+            </div>
+
+            {/* Subject */}
+            <div style={{ marginBottom:12 }}>
+              <label style={{ fontSize:11, fontWeight:700, color:DS.textSub, textTransform:"uppercase", letterSpacing:0.5, display:"block", marginBottom:5 }}>Subject</label>
+              <div style={{ display:"flex", gap:6 }}>
+                {SUBJECTS.map(s => (
+                  <button key={s} onClick={() => updateQuestion(editIdx, { subject: s })}
+                    style={{ padding:"5px 12px", borderRadius:7, border:`1.5px solid ${eq.subject===s?"#4f46e5":DS.border}`, background:eq.subject===s?"#eef2ff":"white", color:eq.subject===s?"#4f46e5":DS.textSub, fontWeight:600, cursor:"pointer", fontSize:12, fontFamily:"inherit" }}>
+                    {s}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Type */}
+            <div style={{ marginBottom:12 }}>
+              <label style={{ fontSize:11, fontWeight:700, color:DS.textSub, textTransform:"uppercase", letterSpacing:0.5, display:"block", marginBottom:5 }}>Type</label>
+              <div style={{ display:"flex", gap:6 }}>
+                {[["mcq","MCQ (+4/−1)"],["integer","Integer (+4/0)"]].map(([val,lbl]) => (
+                  <button key={val} onClick={() => updateQuestion(editIdx, { type:val, options: val==="mcq"?["","","",""]:[],  negative: val==="mcq"?-1:0 })}
+                    style={{ padding:"5px 12px", borderRadius:7, border:`1.5px solid ${eq.type===val?"#4f46e5":DS.border}`, background:eq.type===val?"#eef2ff":"white", color:eq.type===val?"#4f46e5":DS.textSub, fontWeight:600, cursor:"pointer", fontSize:12, fontFamily:"inherit" }}>
+                    {lbl}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Question text */}
+            <div style={{ marginBottom:12 }}>
+              <label style={{ fontSize:11, fontWeight:700, color:DS.textSub, textTransform:"uppercase", letterSpacing:0.5, display:"block", marginBottom:5 }}>Question Text</label>
+              <textarea value={eq.text} onChange={e => updateQuestion(editIdx, { text: e.target.value })} rows={4}
+                placeholder="Enter question text here..."
+                style={{ width:"100%", padding:"9px 12px", borderRadius:8, border:`1.5px solid ${DS.border}`, fontSize:13, resize:"vertical", outline:"none", fontFamily:"inherit", color:DS.text, boxSizing:"border-box" }}
+                onFocus={e=>e.target.style.borderColor="#6366f1"} onBlur={e=>e.target.style.borderColor=DS.border} />
+            </div>
+
+            {/* Options (MCQ only) */}
+            {eq.type === "mcq" && (
+              <div style={{ marginBottom:12 }}>
+                <label style={{ fontSize:11, fontWeight:700, color:DS.textSub, textTransform:"uppercase", letterSpacing:0.5, display:"block", marginBottom:5 }}>Options & Correct Answer</label>
+                {(eq.options || ["","","",""]).map((opt, oi) => (
+                  <div key={oi} style={{ display:"flex", gap:8, alignItems:"center", marginBottom:6 }}>
+                    <button onClick={() => updateQuestion(editIdx, { correct: oi })}
+                      style={{ width:28, height:28, borderRadius:"50%", border:`2px solid ${eq.correct===oi?"#10b981":"#ddd"}`, background:eq.correct===oi?"#10b981":"white", color:eq.correct===oi?"white":DS.textSub, fontWeight:700, cursor:"pointer", fontSize:12, flexShrink:0 }}>
+                      {OPTION_LABELS[oi]}
+                    </button>
+                    <input value={opt} onChange={e => {
+                      const newOpts = [...(eq.options||["","","",""])];
+                      newOpts[oi] = e.target.value;
+                      updateQuestion(editIdx, { options: newOpts });
+                    }} placeholder={`Option ${OPTION_LABELS[oi]}`}
+                      style={{ flex:1, padding:"7px 10px", borderRadius:7, border:`1.5px solid ${eq.correct===oi?"#86efac":DS.border}`, fontSize:13, outline:"none", fontFamily:"inherit", color:DS.text, background:eq.correct===oi?"#f0fdf4":"white" }}
+                      onFocus={e=>e.target.style.borderColor="#6366f1"} onBlur={e=>e.target.style.borderColor=eq.correct===oi?"#86efac":DS.border} />
+                  </div>
+                ))}
+                <div style={{ fontSize:11, color:DS.textSub, marginTop:4 }}>Click a letter to mark as correct answer (shown in green)</div>
+              </div>
+            )}
+
+            {/* Integer answer */}
+            {eq.type === "integer" && (
+              <div style={{ marginBottom:12 }}>
+                <label style={{ fontSize:11, fontWeight:700, color:DS.textSub, textTransform:"uppercase", letterSpacing:0.5, display:"block", marginBottom:5 }}>Correct Integer Answer</label>
+                <input type="number" value={eq.correct ?? ""} onChange={e => updateQuestion(editIdx, { correct: Number(e.target.value) })}
+                  style={{ width:"100%", padding:"9px 12px", borderRadius:8, border:`1.5px solid ${DS.border}`, fontSize:14, fontWeight:700, outline:"none", fontFamily:"inherit", color:DS.text, boxSizing:"border-box" }}
+                  onFocus={e=>e.target.style.borderColor="#6366f1"} onBlur={e=>e.target.style.borderColor=DS.border} />
+              </div>
+            )}
+
+            {/* Marks */}
+            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10, marginBottom:16 }}>
+              <div>
+                <label style={{ fontSize:11, fontWeight:700, color:DS.textSub, textTransform:"uppercase", letterSpacing:0.5, display:"block", marginBottom:5 }}>Marks</label>
+                <input type="number" value={eq.marks ?? 4} onChange={e => updateQuestion(editIdx, { marks: Number(e.target.value) })}
+                  style={{ width:"100%", padding:"8px 10px", borderRadius:7, border:`1.5px solid ${DS.border}`, fontSize:13, outline:"none", fontFamily:"inherit", boxSizing:"border-box" }}
+                  onFocus={e=>e.target.style.borderColor="#6366f1"} onBlur={e=>e.target.style.borderColor=DS.border} />
+              </div>
+              <div>
+                <label style={{ fontSize:11, fontWeight:700, color:DS.textSub, textTransform:"uppercase", letterSpacing:0.5, display:"block", marginBottom:5 }}>Negative</label>
+                <input type="number" value={eq.negative ?? -1} onChange={e => updateQuestion(editIdx, { negative: Number(e.target.value) })}
+                  style={{ width:"100%", padding:"8px 10px", borderRadius:7, border:`1.5px solid ${DS.border}`, fontSize:13, outline:"none", fontFamily:"inherit", boxSizing:"border-box" }}
+                  onFocus={e=>e.target.style.borderColor="#6366f1"} onBlur={e=>e.target.style.borderColor=DS.border} />
+              </div>
+            </div>
+
+            <button onClick={() => { moveQuestion(editIdx, 0); setEditIdx(null); handleSave(); }}
+              style={{ width:"100%", padding:"11px", borderRadius:8, border:"none", background:"linear-gradient(135deg,#4f46e5,#7c3aed)", color:"white", fontWeight:700, cursor:"pointer", fontSize:13, fontFamily:"inherit" }}>
+              ✅ Done Editing
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* Delete confirm modal */}
+      {confirmDelete !== null && (
+        <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,0.5)", display:"flex", alignItems:"center", justifyContent:"center", zIndex:999 }}>
+          <div style={{ background:"white", borderRadius:14, padding:32, maxWidth:360, width:"90%", textAlign:"center" }}>
+            <div style={{ fontSize:40, marginBottom:12 }}>🗑️</div>
+            <h3 style={{ margin:"0 0 8px", color:DS.text }}>Delete Question {confirmDelete + 1}?</h3>
+            <p style={{ color:DS.textSub, fontSize:13, margin:"0 0 20px" }}>This cannot be undone.</p>
+            <div style={{ display:"flex", gap:10, justifyContent:"center" }}>
+              <button onClick={() => setConfirmDelete(null)} style={{ padding:"10px 24px", borderRadius:8, border:`1px solid ${DS.border}`, background:"white", cursor:"pointer", fontFamily:"inherit", fontWeight:600 }}>Cancel</button>
+              <button onClick={() => deleteQuestion(confirmDelete)} style={{ padding:"10px 24px", borderRadius:8, border:"none", background:"#ef4444", color:"white", cursor:"pointer", fontFamily:"inherit", fontWeight:700 }}>Delete</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ════════════════════════════════════════════════════
    ADMIN SCREEN
 ════════════════════════════════════════════════════ */
 function AdminScreen({ user, tests, onSaveTests, onLogout, serverReady }) {
@@ -1562,9 +1823,17 @@ async function embedFigureImages(questions, pdfBase64, onProgress) {
     setPaperFile(null); setKeyFile(null);
   };
 
+  const [editingTest, setEditingTest] = useState(null);
+
   const deleteTest = async (id) => {
     const updated = tests.filter(t=>t.id!==id);
     await onSaveTests(updated);
+  };
+
+  const saveEditedTest = async (testId, updatedQuestions) => {
+    const updated = tests.map(t => t.id === testId ? { ...t, questions: updatedQuestions } : t);
+    await onSaveTests(updated);
+    setEditingTest(null);
   };
 
   const navItems = [
@@ -1651,6 +1920,10 @@ async function embedFigureImages(questions, pdfBase64, onProgress) {
                           color: copiedId===test.id ? "#15803d" : "#4f46e5", cursor:"pointer", fontSize:12, fontWeight:600, fontFamily:"inherit" }}>
                         {copiedId===test.id ? "✓ Copied" : "Copy Link"}
                       </button>
+                      <button onClick={()=>{ setEditingTest(test); setView("edit"); }}
+                        style={{ padding:"6px 14px", borderRadius:7, border:"1px solid #d1fae5", background:"#ecfdf5", color:"#059669", cursor:"pointer", fontSize:12, fontWeight:600, fontFamily:"inherit" }}>
+                        ✏️ Edit
+                      </button>
                       <button onClick={()=>deleteTest(test.id)}
                         style={{ padding:"6px 12px", borderRadius:7, border:"1px solid #fecaca", background:"#fef2f2", color:"#b91c1c", cursor:"pointer", fontSize:12, fontWeight:600, fontFamily:"inherit" }}>
                         Delete
@@ -1661,6 +1934,15 @@ async function embedFigureImages(questions, pdfBase64, onProgress) {
               })}
             </div>
           </>
+        )}
+
+        {/* ── EDIT TEST ── */}
+        {view === "edit" && editingTest && (
+          <TestEditorView
+            test={editingTest}
+            onSave={(qs) => saveEditedTest(editingTest.id, qs)}
+            onBack={() => { setView("dashboard"); setEditingTest(null); }}
+          />
         )}
 
         {/* ── SETTINGS ── */}
