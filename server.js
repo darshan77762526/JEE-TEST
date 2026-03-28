@@ -450,6 +450,10 @@ function buildSubjectPrompt(subject, startId) {
   return `You are extracting ONLY the ${subject} questions from this JEE exam PDF.
 Focus exclusively on ${subject} questions. Question IDs start from ${startId}.
 
+IMPORTANT: Extract ALL ${subject} questions in the PDF — do not stop early. If this is a single-subject paper (only ${subject}), extract every single question. Count all questions carefully before finishing.
+
+DUPLICATE PREVENTION: Each question must appear EXACTLY ONCE. Do not repeat a question even if it appears again later in the PDF (e.g., in an answer key section or appendix). If you see the same question text twice, only extract it the first time.
+
 FIGURE HANDLING — THIS IS CRITICAL:
 When a question or its options contain a diagram, graph, circuit, or any visual figure:
 - Set "hasFigure": true
@@ -480,7 +484,7 @@ RULES:
 - hasFigure: true only when question has an actual visual element (not just symbols)
 - figurePageNumber: exact PDF page number as integer, or null
 - figureRegion: TIGHT bounding box {"top","bottom","left","right"} as percentages. Height (bottom-top) must be LESS than 45% of page. Width (right-left) must be LESS than 95% of page. or null if no figure
-- Extract EVERY ${subject} question — do not skip any
+- Extract EVERY ${subject} question — do not skip any, do not duplicate any
 - Output ONLY the JSON object, no markdown`;
 }
 
@@ -541,6 +545,29 @@ app.post("/api/parse-pdf", async (req, res) => {
     }
   }
 
+  // Helper: deduplicate questions by text similarity
+  function deduplicateQuestions(questions) {
+    const seen = new Map(); // normalized text -> index of kept question
+    const result = [];
+    for (const q of questions) {
+      // Normalize: lowercase, strip whitespace and punctuation for comparison
+      const norm = (q.text || "").toLowerCase().replace(/\s+/g, " ").replace(/[^\w\s]/g, "").trim().slice(0, 80);
+      if (!norm) { result.push(q); continue; }
+      if (seen.has(norm)) {
+        // Keep the version that has a figure (more complete)
+        const existingIdx = seen.get(norm);
+        if (q.hasFigure && !result[existingIdx].hasFigure) {
+          result[existingIdx] = q; // replace with the richer version
+        }
+        // otherwise discard this duplicate
+      } else {
+        seen.set(norm, result.length);
+        result.push(q);
+      }
+    }
+    return result;
+  }
+
   const subjects = ["Physics", "Chemistry", "Mathematics"];
   const startIds = { Physics: 1, Chemistry: 31, Mathematics: 61 };
 
@@ -564,7 +591,8 @@ app.post("/api/parse-pdf", async (req, res) => {
 
   if (allQuestions.length > 0) {
     allQuestions.sort((a, b) => (a.id || 0) - (b.id || 0));
-    const numbered = allQuestions.map((q, i) => ({ ...q, id: i + 1 }));
+    const deduped = deduplicateQuestions(allQuestions);
+    const numbered = deduped.map((q, i) => ({ ...q, id: i + 1 }));
     return res.status(200).json({
       ok: true, data: { questions: numbered }, modelUsed: "parallel",
       warning: failures.length > 0 ? `Could not extract ${failures.join(", ")} questions.` : null,
@@ -576,7 +604,8 @@ app.post("/api/parse-pdf", async (req, res) => {
       null, models, base64, buildFullPrompt(),
       p => Array.isArray(p.questions) && p.questions.length > 0
     );
-    const numbered = parsed.questions.map((q, i) => ({ ...q, id: i + 1 }));
+    const deduped = deduplicateQuestions(parsed.questions);
+    const numbered = deduped.map((q, i) => ({ ...q, id: i + 1 }));
     return res.status(200).json({ ok: true, data: { questions: numbered }, modelUsed: model });
   } catch (err) {
     return res.status(502).json({ error: err.message });
