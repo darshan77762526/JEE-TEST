@@ -687,9 +687,9 @@ const DEMO_QUESTIONS = [
    The Gemini API key never touches the browser.
 ───────────────────────────────────────────── */
 async function parsePDF(base64, isKey, model, attempt = 0) {
-  // 150 second timeout — large JEE PDFs can take a while
+  // 300 second timeout — crop-based extraction produces large JSON responses
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 150_000);
+  const timer = setTimeout(() => controller.abort(), 300_000);
 
   let res;
   try {
@@ -1549,7 +1549,6 @@ function AdminScreen({ user, tests, onSaveTests, onLogout, serverReady }) {
 ───────────────────────────────────────────── */
 async function embedQuestionImages(questions, pdfBase64, onProgress) {
   // Build a de-duplicated set of crop jobs
-  // Each job: { page, cropRegion } → imageData
   const jobMap = {};
 
   const addJob = (page, region) => {
@@ -1559,17 +1558,14 @@ async function embedQuestionImages(questions, pdfBase64, onProgress) {
     return key;
   };
 
-  // Register jobs for question bodies and option regions
+  // Register jobs for question bodies and options block
   questions.forEach(q => {
     if (q.page && q.questionRegion) addJob(q.page, q.questionRegion);
+    if (q.page && q.optionsRegion) addJob(q.page, q.optionsRegion);
+    // Legacy: optionRegions per-option (keep backward compat)
     if (q.optionRegions) {
-      if (q.optionRegions.ALL) {
-        addJob(q.page, q.optionRegions.ALL);
-      } else {
-        ["A","B","C","D"].forEach(lbl => {
-          if (q.optionRegions[lbl]) addJob(q.page, q.optionRegions[lbl]);
-        });
-      }
+      if (q.optionRegions.ALL) addJob(q.page, q.optionRegions.ALL);
+      else ["A","B","C","D"].forEach(l => { if (q.optionRegions[l]) addJob(q.page, q.optionRegions[l]); });
     }
   });
 
@@ -1596,33 +1592,33 @@ async function embedQuestionImages(questions, pdfBase64, onProgress) {
     }));
   }
 
-  // Attach images to each question
+  const getKey = (page, region) => {
+    if (!page || !region) return null;
+    return `${page}:${Math.round(region.top)}:${Math.round(region.bottom)}:${Math.round(region.left??0)}:${Math.round(region.right??100)}`;
+  };
+
   return questions.map(q => {
-    const getKey = (page, region) => {
-      if (!page || !region) return null;
-      return `${page}:${Math.round(region.top)}:${Math.round(region.bottom)}:${Math.round(region.left??0)}:${Math.round(region.right??100)}`;
-    };
-
     const qKey = getKey(q.page, q.questionRegion);
-    const questionImageData = qKey ? imageCache[qKey] : null;
+    const questionImageData = qKey ? (imageCache[qKey] || null) : null;
 
+    // Options image: use optionsRegion (new) or optionRegions.ALL (legacy)
+    const optRegion = q.optionsRegion || q.optionRegions?.ALL;
+    const oKey = getKey(q.page, optRegion);
+    const optionsImageData = (q.type === "mcq" && oKey) ? (imageCache[oKey] || null) : null;
+
+    // Per-option images (legacy optionRegions A/B/C/D)
     let optionImages = null;
-    if (q.type === "mcq" && q.optionRegions) {
-      if (q.optionRegions.ALL) {
-        const k = getKey(q.page, q.optionRegions.ALL);
-        optionImages = { ALL: k ? imageCache[k] : null };
-      } else {
-        optionImages = {};
-        ["A","B","C","D"].forEach(lbl => {
-          if (q.optionRegions[lbl]) {
-            const k = getKey(q.page, q.optionRegions[lbl]);
-            optionImages[lbl] = k ? imageCache[k] : null;
-          }
-        });
-      }
+    if (q.type === "mcq" && q.optionRegions && !q.optionRegions.ALL) {
+      optionImages = {};
+      ["A","B","C","D"].forEach(lbl => {
+        if (q.optionRegions[lbl]) {
+          const k = getKey(q.page, q.optionRegions[lbl]);
+          optionImages[lbl] = k ? (imageCache[k] || null) : null;
+        }
+      });
     }
 
-    return { ...q, questionImageData, optionImages };
+    return { ...q, questionImageData, optionsImageData, optionImages };
   });
 }
 
@@ -2951,8 +2947,9 @@ function TestScreen({ test, student, onSubmit }) {
 
             {cur.type === "mcq" ? (
               <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
-                {/* If options are individual crop images */}
-                {cur.optionImages && !cur.optionImages.ALL ? (
+
+                {/* CASE 1: Per-option images (legacy optionRegions A/B/C/D) */}
+                {cur.optionImages && Object.keys(cur.optionImages).length > 0 ? (
                   ["A","B","C","D"].map((lbl, oi) => {
                     const sel = answers[curGi] === oi;
                     const imgData = cur.optionImages?.[lbl];
@@ -2975,36 +2972,45 @@ function TestScreen({ test, student, onSubmit }) {
                       </div>
                     );
                   })
-                ) : cur.optionImages?.ALL ? (
-                  /* All options in one image block — show image + tap-to-select A/B/C/D */
+
+                /* CASE 2: Single options block image + A/B/C/D tap buttons below (new optionsRegion) */
+                ) : cur.optionsImageData ? (
                   <div>
-                    <div style={{ background:"white", borderRadius:8, border:"1px solid #e0e0e0", overflow:"hidden", marginBottom:10 }}>
-                      <img src={`data:image/png;base64,${cur.optionImages.ALL}`} alt="Options" style={{ maxWidth:"100%", display:"block" }} />
+                    <div style={{ background:"white", borderRadius:8, border:"1px solid #e0e0e0", overflow:"hidden", marginBottom:12 }}>
+                      <img src={`data:image/png;base64,${cur.optionsImageData}`} alt="Options A B C D" style={{ maxWidth:"100%", display:"block", width:"100%" }} />
                     </div>
                     <div style={{ display:"flex", gap:10, justifyContent:"center" }}>
                       {["A","B","C","D"].map((lbl,oi) => {
                         const sel = answers[curGi] === oi;
                         return (
                           <button key={oi} onClick={() => setAnswers(p => ({...p,[curGi]:oi}))}
-                            style={{ width:52, height:52, borderRadius:"50%", border:`2px solid ${sel?"#1a237e":"#bbb"}`,
+                            style={{ width:56, height:56, borderRadius:"50%",
+                              border:`3px solid ${sel?"#1a237e":"#bbb"}`,
                               background:sel?"#1a237e":"white", color:sel?"white":"#555",
-                              fontWeight:800, fontSize:16, cursor:"pointer" }}>
+                              fontWeight:900, fontSize:18, cursor:"pointer",
+                              boxShadow: sel?"0 2px 8px rgba(26,35,126,0.3)":"none",
+                              transition:"all 0.1s" }}>
                             {lbl}
                           </button>
                         );
                       })}
                     </div>
+                    {answers[curGi] !== undefined && (
+                      <div style={{ textAlign:"center", marginTop:8, fontSize:13, color:"#1a237e", fontWeight:600 }}>
+                        Selected: Option {["A","B","C","D"][answers[curGi]]}
+                      </div>
+                    )}
                   </div>
+
+                /* CASE 3: Fallback text options (demo questions) */
                 ) : (
-                  /* Fallback: text options (for demo questions or when images failed) */
                   (cur.options||[]).map((opt, oi) => {
                     const sel = answers[curGi] === oi;
                     return (
                       <div key={oi} onClick={() => setAnswers(p => ({...p,[curGi]:oi}))}
                         style={{ padding:"13px 18px", borderRadius:6, border:`2px solid ${sel?"#1a237e":"#ddd"}`,
                           background:sel?"#e8eaf6":"white", cursor:"pointer",
-                          display:"flex", gap:14, alignItems:"center", transition:"all 0.1s",
-                          boxShadow:sel?"0 0 0 1px #1a237e":"0 1px 2px rgba(0,0,0,0.04)" }}>
+                          display:"flex", gap:14, alignItems:"center", transition:"all 0.1s" }}>
                         <div style={{ width:30, height:30, borderRadius:"50%",
                           background:sel?"#1a237e":"white", color:sel?"white":"#555",
                           border:`2px solid ${sel?"#1a237e":"#bbb"}`,
@@ -3012,9 +3018,7 @@ function TestScreen({ test, student, onSubmit }) {
                           fontWeight:800, fontSize:13, flexShrink:0 }}>
                           {["A","B","C","D"][oi]}
                         </div>
-                        <span style={{ fontSize:14, color:"#212121", fontFamily:"Georgia, serif", lineHeight:1.6 }}>
-                          {opt}
-                        </span>
+                        <span style={{ fontSize:14, color:"#212121", fontFamily:"Georgia, serif" }}>{opt}</span>
                       </div>
                     );
                   })
@@ -3379,25 +3383,47 @@ function ResultsScreen({ test, student, submission, onBack }) {
                       }
                     </div>
                     {q.type === "mcq" && (
-                      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:6, marginBottom:8 }}>
-                        {["A","B","C","D"].map((lbl, oi) => {
-                          const isCorrect = oi === q.correct;
-                          const isChosen = String(r.given) === String(oi);
-                          const optImg = q.optionImages?.[lbl];
-                          return (
-                            <div key={oi} style={{ padding: optImg ? "4px 8px" : "7px 12px", borderRadius:7, fontSize:13,
-                              background: isCorrect ? "#dcfce7" : isChosen&&!isCorrect ? "#fee2e2" : "#f9fafb",
-                              border: `1px solid ${isCorrect ? "#86efac" : isChosen&&!isCorrect ? "#fca5a5" : DS.border}`,
-                              color: isCorrect ? "#15803d" : isChosen&&!isCorrect ? "#b91c1c" : DS.textMid,
-                              fontWeight: isCorrect||isChosen ? 600 : 400 }}>
-                              <span style={{ fontWeight:700, marginRight:6 }}>{lbl}.</span>
-                              {optImg
-                                ? <img src={`data:image/png;base64,${optImg}`} alt={`Opt ${lbl}`} style={{ maxWidth:"100%", verticalAlign:"middle" }} />
-                                : <span>{(q.options||[])[oi] || lbl}</span>
-                              }
+                      <div style={{ marginBottom:8 }}>
+                        {q.optionsImageData ? (
+                          <div style={{ marginBottom:6 }}>
+                            <img src={`data:image/png;base64,${q.optionsImageData}`} alt="Options" style={{ maxWidth:"100%", borderRadius:6, border:"1px solid #eee" }} />
+                            <div style={{ display:"flex", gap:8, marginTop:6, flexWrap:"wrap" }}>
+                              {["A","B","C","D"].map((lbl,oi) => {
+                                const isCorrect = oi === q.correct;
+                                const isChosen = String(r.given) === String(oi);
+                                return (
+                                  <span key={oi} style={{ padding:"3px 12px", borderRadius:99, fontSize:13, fontWeight:700,
+                                    background: isCorrect?"#dcfce7":isChosen&&!isCorrect?"#fee2e2":"#f3f4f6",
+                                    color: isCorrect?"#15803d":isChosen&&!isCorrect?"#b91c1c":"#6b7280",
+                                    border:`1px solid ${isCorrect?"#86efac":isChosen&&!isCorrect?"#fca5a5":"#e5e7eb"}` }}>
+                                    {lbl}{isCorrect?" ✓":""}{isChosen&&!isCorrect?" ✗":""}
+                                  </span>
+                                );
+                              })}
                             </div>
-                          );
-                        })}
+                          </div>
+                        ) : (
+                          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:6 }}>
+                            {["A","B","C","D"].map((lbl,oi) => {
+                              const isCorrect = oi === q.correct;
+                              const isChosen = String(r.given) === String(oi);
+                              const optImg = q.optionImages?.[lbl];
+                              return (
+                                <div key={oi} style={{ padding: optImg?"4px 8px":"7px 12px", borderRadius:7, fontSize:13,
+                                  background: isCorrect?"#dcfce7":isChosen&&!isCorrect?"#fee2e2":"#f9fafb",
+                                  border:`1px solid ${isCorrect?"#86efac":isChosen&&!isCorrect?"#fca5a5":DS.border}`,
+                                  color: isCorrect?"#15803d":isChosen&&!isCorrect?"#b91c1c":DS.textMid,
+                                  fontWeight: isCorrect||isChosen?600:400 }}>
+                                  <span style={{ fontWeight:700, marginRight:6 }}>{lbl}.</span>
+                                  {optImg
+                                    ? <img src={`data:image/png;base64,${optImg}`} alt={`Opt ${lbl}`} style={{ maxWidth:"100%", verticalAlign:"middle" }} />
+                                    : <span>{(q.options||[])[oi]||lbl}</span>
+                                  }
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
                       </div>
                     )}
                     <div style={{ display:"flex", gap:16, fontSize:12 }}>
