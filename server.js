@@ -212,64 +212,30 @@ async function callGeminiWithFallback(apiKey, models, base64, promptText, valida
    The frontend then renders the actual PDF image crop for each question.
 ══════════════════════════════════════════════════════════════════ */
 function buildQuestionLocatorPrompt(subject, startId) {
-  return `You are analyzing a JEE (Indian engineering entrance exam) PDF.
-Extract ONLY the ${subject} questions. IDs start from ${startId}.
+  return `You are analyzing a JEE exam PDF. Extract ONLY ${subject} questions. IDs start at ${startId}.
 
-For EACH question, provide:
-1. The EXACT page number where it appears
-2. A TIGHT crop region for the ENTIRE question body (question text + any diagrams/figures, but NOT the answer options A/B/C/D)
-3. For MCQ: crop regions for EACH option (A, B, C, D) separately, OR if all options fit on one line/block, a single optionsRegion covering all of them
-4. The correct answer index (0=A, 1=B, 2=C, 3=D for MCQ; the integer value for integer type)
-5. The question type: "mcq" or "integer"
+For EACH question return:
+- id: sequential number starting at ${startId}
+- subject: "${subject}"
+- type: "mcq" or "integer"
+- page: page number (integer)
+- questionRegion: TIGHT bounding box of ONLY the question text + any diagram/figure. Do NOT include the A/B/C/D options. Values are % of page (0-100): {"top","bottom","left","right"}
+- optionsRegion: For MCQ — bounding box covering ALL four options (A,B,C,D) together as one block. For integer — null.
+- correct: 0-based index for MCQ (0=A,1=B,2=C,3=D), or the integer answer
+- marks: 4
+- negative: -1 for MCQ, 0 for integer
 
-CROP REGIONS are percentages (0-100) of page dimensions:
-- top/bottom = % of page HEIGHT from top
-- left/right = % of page WIDTH from left
-- Be PRECISE and TIGHT — crop exactly the content, not surrounding whitespace
-
-For INTEGER type questions: there are no options (A/B/C/D), just a box to type a number.
-
-DUPLICATE PREVENTION: Each question appears EXACTLY ONCE. Skip any question that appears again in answer key sections.
+RULES:
+- questionRegion must NOT overlap with optionsRegion
+- Be TIGHT — typical questionRegion is 10-35% of page height
+- Each question appears EXACTLY ONCE (skip answer key sections)
+- Extract ALL ${subject} questions
 
 Return ONLY valid JSON, no markdown:
 {"questions":[
-  {
-    "id": ${startId},
-    "subject": "${subject}",
-    "type": "mcq",
-    "page": 2,
-    "questionRegion": {"top":10,"bottom":35,"left":3,"right":97},
-    "optionRegions": {
-      "A": {"top":36,"bottom":44,"left":3,"right":50},
-      "B": {"top":36,"bottom":44,"left":51,"right":97},
-      "C": {"top":45,"bottom":53,"left":3,"right":50},
-      "D": {"top":45,"bottom":53,"left":51,"right":97}
-    },
-    "correct": 1,
-    "marks": 4,
-    "negative": -1
-  },
-  {
-    "id": ${startId+1},
-    "subject": "${subject}",
-    "type": "integer",
-    "page": 3,
-    "questionRegion": {"top":55,"bottom":78,"left":3,"right":97},
-    "optionRegions": null,
-    "correct": 24,
-    "marks": 4,
-    "negative": 0
-  }
-]}
-
-RULES:
-- subject: EXACTLY "${subject}"
-- correct: 0-based index for MCQ (0=A,1=B,2=C,3=D); actual integer for integer type
-- marks: 4 (default), negative: -1 for MCQ, 0 for integer
-- questionRegion: covers ONLY the question stem + any embedded diagram. Do NOT include the options.
-- optionRegions: object with keys "A","B","C","D" for MCQ. null for integer type.
-- If all 4 options span one region, use "ALL": {"top":T,"bottom":B,"left":L,"right":R} instead
-- Extract ALL ${subject} questions. No duplicates. Output ONLY JSON.`;
+{"id":${startId},"subject":"${subject}","type":"mcq","page":2,"questionRegion":{"top":8,"bottom":32,"left":3,"right":97},"optionsRegion":{"top":33,"bottom":55,"left":3,"right":97},"correct":1,"marks":4,"negative":-1},
+{"id":${startId+1},"subject":"${subject}","type":"integer","page":3,"questionRegion":{"top":60,"bottom":80,"left":3,"right":97},"optionsRegion":null,"correct":24,"marks":4,"negative":0}
+]}`;
 }
 
 function buildAnswerKeyPrompt() {
@@ -347,12 +313,12 @@ app.post("/api/parse-pdf", async (req, res) => {
   }
 
   // Fallback: single call for all subjects
-  const fallbackPrompt = `You are analyzing a JEE exam PDF. Extract ALL questions (Physics, Chemistry, Mathematics).
+  const fallbackPrompt = `Extract ALL questions from this JEE exam PDF (Physics, Chemistry, Mathematics).
 
-For EACH question provide: id, subject ("Physics"/"Chemistry"/"Mathematics"), type ("mcq"/"integer"), page number, questionRegion (tight crop of question text+diagram, NOT options), optionRegions (object with A/B/C/D keys for MCQ, null for integer), correct answer (0-based index for MCQ, integer value for integer type), marks (default 4), negative (-1 for MCQ, 0 for integer).
+For EACH question: id (sequential), subject, type ("mcq"/"integer"), page, questionRegion (tight crop of question text+diagram, NOT options), optionsRegion (one box covering all A/B/C/D options for MCQ, null for integer), correct (0-based index for MCQ, integer value for integer type), marks (4), negative (-1 MCQ, 0 integer).
 
 Return ONLY valid JSON:
-{"questions":[{"id":1,"subject":"Physics","type":"mcq","page":1,"questionRegion":{"top":5,"bottom":28,"left":3,"right":97},"optionRegions":{"A":{"top":29,"bottom":37,"left":3,"right":50},"B":{"top":29,"bottom":37,"left":51,"right":97},"C":{"top":38,"bottom":46,"left":3,"right":50},"D":{"top":38,"bottom":46,"left":51,"right":97}},"correct":2,"marks":4,"negative":-1}]}
+{"questions":[{"id":1,"subject":"Physics","type":"mcq","page":1,"questionRegion":{"top":5,"bottom":28,"left":3,"right":97},"optionsRegion":{"top":29,"bottom":48,"left":3,"right":97},"correct":2,"marks":4,"negative":-1},{"id":2,"subject":"Chemistry","type":"integer","page":2,"questionRegion":{"top":50,"bottom":72,"left":3,"right":97},"optionsRegion":null,"correct":5,"marks":4,"negative":0}]}
 
 Extract ALL questions, no duplicates. Output ONLY JSON.`;
 
