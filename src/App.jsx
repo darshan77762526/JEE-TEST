@@ -135,10 +135,37 @@ function renderMath(text) {
 }
 
 /* ─────────────────────────────────────────────
-   FIGURE / DIAGRAM RENDERER
-   Shows actual PDF page images instead of re-drawn SVGs.
-   Falls back to SVG only for legacy [FIGURE: description] format.
+   CROP IMAGE RENDERER
+   Displays a cropped PDF page image for questions and options.
+   This is the core rendering primitive — no text extraction needed.
 ───────────────────────────────────────────── */
+
+/* ══════════════════════════════════════════
+   CropImage — renders a base64 PNG crop
+   Shows a placeholder if no image yet
+══════════════════════════════════════════ */
+function CropImage({ imageData, label, style = {} }) {
+  if (!imageData) {
+    return (
+      <div style={{
+        display: "flex", alignItems: "center", justifyContent: "center",
+        background: "#f8faff", border: "1.5px dashed #c7d2fe", borderRadius: 8,
+        padding: "18px 24px", color: "#6366f1", fontSize: 13, gap: 8,
+        ...style
+      }}>
+        <span style={{ fontSize: 20 }}>📄</span>
+        <span>{label || "Loading question..."}</span>
+      </div>
+    );
+  }
+  return (
+    <img
+      src={`data:image/png;base64,${imageData}`}
+      alt={label || "Question"}
+      style={{ maxWidth: "100%", height: "auto", display: "block", ...style }}
+    />
+  );
+}
 
 /* ══════════════════════════════════════════
    REAL PAGE IMAGE — fetches actual PDF page
@@ -1515,92 +1542,51 @@ function AdminScreen({ user, tests, onSaveTests, onLogout, serverReady }) {
    from the server and stores it as figureImageData (base64 PNG) directly
    in the question object. This way images are always available.
 ───────────────────────────────────────────── */
-async function embedFigureImages(questions, pdfBase64, onProgress) {
-  // Step 1: For questions with figurePageNumber but no figureRegion, try auto-detecting the region
-  const questionsNeedingDetection = questions.filter(
-    q => q.hasFigure && q.figurePageNumber && !q.figureRegion
-  );
-
-  if (questionsNeedingDetection.length > 0) {
-    const pageCache = {};
-    const uniquePages = [...new Set(questionsNeedingDetection.map(q => q.figurePageNumber))];
-
-    await Promise.all(uniquePages.map(async page => {
-      try {
-        const res = await fetch("/api/page-image", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ base64: pdfBase64, page, cropRegion: null }),
-        });
-        const data = await res.json();
-        if (data.ok && data.image) pageCache[page] = data.image;
-      } catch {}
-    }));
-
-    await Promise.all(questionsNeedingDetection.map(async q => {
-      const fullPageImage = pageCache[q.figurePageNumber];
-      if (!fullPageImage) return;
-      try {
-        const hint = q.text ? q.text.replace(/\[FIGURE[^\]]*\]/g, "").trim().slice(0, 120) : "";
-        const res = await fetch("/api/detect-figure-region", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ pageImageBase64: fullPageImage, questionHint: hint }),
-        });
-        const data = await res.json();
-        if (data.ok && data.region) {
-          q.figureRegion = data.region;
-        }
-      } catch {}
-    }));
-  }
-
-  // Step 2: Deduplicate questions that appear to be the same (same text + same page)
-  // This prevents the same figure from showing up multiple times due to PDF parsing repeats
-  const seen = new Set();
-  questions = questions.filter(q => {
-    const key = `${q.figurePageNumber}:${q.text?.slice(0,50)}`;
-    if (q.hasFigure && seen.has(key)) return false;
-    if (q.hasFigure) seen.add(key);
-    return true;
-  });
-
-  // Step 3: Build crop jobs — use figureRegion if available, else skip (don't show bad full-page crops)
-  // Only use CENTER_STRIP as last resort, and only if figureRegion seems valid
+/* ─────────────────────────────────────────────
+   EMBED QUESTION IMAGES
+   New approach: crops the ENTIRE question body and each option
+   separately from the PDF, storing as base64 PNGs in the question object.
+───────────────────────────────────────────── */
+async function embedQuestionImages(questions, pdfBase64, onProgress) {
+  // Build a de-duplicated set of crop jobs
+  // Each job: { page, cropRegion } → imageData
   const jobMap = {};
+
+  const addJob = (page, region) => {
+    if (!page || !region) return null;
+    const key = `${page}:${Math.round(region.top)}:${Math.round(region.bottom)}:${Math.round(region.left??0)}:${Math.round(region.right??100)}`;
+    if (!jobMap[key]) jobMap[key] = { page, cropRegion: region };
+    return key;
+  };
+
+  // Register jobs for question bodies and option regions
   questions.forEach(q => {
-    if (!q.hasFigure || !q.figurePageNumber) return;
-    
-    let r = q.figureRegion;
-    
-    // Validate region: reject if it covers >80% of page height (too big, likely wrong)
-    if (r && (r.bottom - r.top) > 80) r = null;
-    
-    // If no valid region from Gemini detection, use a tighter center-of-page strip
-    // This avoids showing the entire PDF page
-    if (!r) {
-      // Don't embed figure if we can't get a good crop — show placeholder instead
-      return;
+    if (q.page && q.questionRegion) addJob(q.page, q.questionRegion);
+    if (q.optionRegions) {
+      if (q.optionRegions.ALL) {
+        addJob(q.page, q.optionRegions.ALL);
+      } else {
+        ["A","B","C","D"].forEach(lbl => {
+          if (q.optionRegions[lbl]) addJob(q.page, q.optionRegions[lbl]);
+        });
+      }
     }
-    
-    const key = `${q.figurePageNumber}:${r.top}:${r.bottom}:${r.left ?? 0}:${r.right ?? 100}`;
-    if (!jobMap[key]) jobMap[key] = { page: q.figurePageNumber, cropRegion: r };
   });
 
   const jobs = Object.entries(jobMap);
   if (jobs.length === 0) return questions;
 
+  // Fetch all crops in batches of 5
   const imageCache = {};
   let done = 0;
   const BATCH = 5;
   for (let i = 0; i < jobs.length; i += BATCH) {
-    const batch = jobs.slice(i, i + BATCH);
-    await Promise.all(batch.map(async ([key, { page, cropRegion }]) => {
+    await Promise.all(jobs.slice(i, i + BATCH).map(async ([key, { page, cropRegion }]) => {
       try {
         const res = await fetch("/api/page-image", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ base64: pdfBase64, page, cropRegion }),
+          body: JSON.stringify({ base64: pdfBase64, page, cropRegion, dpi: 200 }),
         });
         const data = await res.json();
         if (data.ok && data.image) imageCache[key] = data.image;
@@ -1610,14 +1596,39 @@ async function embedFigureImages(questions, pdfBase64, onProgress) {
     }));
   }
 
+  // Attach images to each question
   return questions.map(q => {
-    if (!q.hasFigure || !q.figurePageNumber) return q;
-    const r = q.figureRegion;
-    if (!r || (r.bottom - r.top) > 80) return q; // no valid region → keep placeholder
-    const key = `${q.figurePageNumber}:${r.top}:${r.bottom}:${r.left ?? 0}:${r.right ?? 100}`;
-    if (imageCache[key]) return { ...q, figureImageData: imageCache[key] };
-    return q;
+    const getKey = (page, region) => {
+      if (!page || !region) return null;
+      return `${page}:${Math.round(region.top)}:${Math.round(region.bottom)}:${Math.round(region.left??0)}:${Math.round(region.right??100)}`;
+    };
+
+    const qKey = getKey(q.page, q.questionRegion);
+    const questionImageData = qKey ? imageCache[qKey] : null;
+
+    let optionImages = null;
+    if (q.type === "mcq" && q.optionRegions) {
+      if (q.optionRegions.ALL) {
+        const k = getKey(q.page, q.optionRegions.ALL);
+        optionImages = { ALL: k ? imageCache[k] : null };
+      } else {
+        optionImages = {};
+        ["A","B","C","D"].forEach(lbl => {
+          if (q.optionRegions[lbl]) {
+            const k = getKey(q.page, q.optionRegions[lbl]);
+            optionImages[lbl] = k ? imageCache[k] : null;
+          }
+        });
+      }
+    }
+
+    return { ...q, questionImageData, optionImages };
   });
+}
+
+// Legacy wrapper kept for backward compatibility
+async function embedFigureImages(questions, pdfBase64, onProgress) {
+  return embedQuestionImages(questions, pdfBase64, onProgress);
 }
 
   const updateStudentPassword = async (name, newPass) => {
@@ -1638,8 +1649,10 @@ async function embedFigureImages(questions, pdfBase64, onProgress) {
 
   const normalizeQs = (qs) => qs.map((q, idx) => {
     let type = q.type;
-    if (!q.options || q.options.length === 0) type = "integer";
-    if (q.options && q.options.length > 0) type = "mcq";
+    if (!q.optionRegions && (!q.options || q.options.length === 0)) type = "integer";
+    if (q.optionRegions || (q.options && q.options.length > 0)) type = "mcq";
+    // If type still not set, default based on Gemini output
+    if (!type) type = q.type || "mcq";
     return {
       ...q,
       id: q.id || (idx + 1),
@@ -1647,6 +1660,10 @@ async function embedFigureImages(questions, pdfBase64, onProgress) {
       options: type === "mcq" ? (q.options || []) : [],
       marks: Number(q.marks) || 4,
       negative: q.negative !== undefined ? Number(q.negative) : (type === "mcq" ? -1 : 0),
+      // preserve new crop fields
+      page: q.page || null,
+      questionRegion: q.questionRegion || null,
+      optionRegions: q.optionRegions || null,
     };
   });
 
@@ -2922,64 +2939,139 @@ function TestScreen({ test, student, onSubmit }) {
             </span>
           </div>
 
-          {/* Question body */}
+          {/* Question body — shows PDF crop */}
           <div style={{ flex:1, overflowY:"auto", padding:"20px 24px" }}>
-            <div style={{ background:"white", borderRadius:8, border:"1px solid #e0e0e0", padding:"20px 24px", marginBottom:16, boxShadow:"0 1px 4px rgba(0,0,0,0.06)" }}>
-              <div style={{ fontSize:15, lineHeight:2, color:"#212121", margin:0, fontFamily:"Georgia, serif" }}>
-                {renderQuestionText(cur.text, false, cur.figurePageNumber, cur.figureImageData)}
-              </div>
+            <div style={{ background:"white", borderRadius:8, border:"1px solid #e0e0e0", marginBottom:16, boxShadow:"0 1px 4px rgba(0,0,0,0.06)", overflow:"hidden" }}>
+              <CropImage
+                imageData={cur.questionImageData}
+                label={`Question ${subQs.findIndex(q=>q.gi===curGi)+1}`}
+                style={{ maxWidth:"100%", width:"100%" }}
+              />
             </div>
 
             {cur.type === "mcq" ? (
               <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
-                {cur.options.map((opt, oi) => {
-                  const sel = answers[curGi] === oi;
-                  return (
-                    <div key={oi} onClick={() => setAnswers(p => ({ ...p, [curGi]: oi }))}
-                      style={{ padding:"13px 18px", borderRadius:6, border: `2px solid ${sel ? "#1a237e" : "#ddd"}`,
-                        background: sel ? "#e8eaf6" : "white", cursor:"pointer",
-                        display:"flex", gap:14, alignItems:"center", transition:"all 0.1s",
-                        boxShadow: sel ? "0 0 0 1px #1a237e" : "0 1px 2px rgba(0,0,0,0.04)" }}>
-                      <div style={{ width:30, height:30, borderRadius:"50%",
-                        background: sel ? "#1a237e" : "white", color: sel ? "white" : "#555",
-                        border: `2px solid ${sel ? "#1a237e" : "#bbb"}`,
-                        display:"flex", alignItems:"center", justifyContent:"center",
-                        fontWeight:800, fontSize:13, flexShrink:0 }}>
-                        {["A","B","C","D"][oi]}
+                {/* If options are individual crop images */}
+                {cur.optionImages && !cur.optionImages.ALL ? (
+                  ["A","B","C","D"].map((lbl, oi) => {
+                    const sel = answers[curGi] === oi;
+                    const imgData = cur.optionImages?.[lbl];
+                    return (
+                      <div key={oi} onClick={() => setAnswers(p => ({...p, [curGi]: oi}))}
+                        style={{ borderRadius:6, border:`2px solid ${sel?"#1a237e":"#ddd"}`,
+                          background:sel?"#e8eaf6":"white", cursor:"pointer", transition:"all 0.1s",
+                          display:"flex", alignItems:"stretch", overflow:"hidden",
+                          boxShadow:sel?"0 0 0 1px #1a237e":"0 1px 2px rgba(0,0,0,0.04)" }}>
+                        <div style={{ width:38, flexShrink:0, display:"flex", alignItems:"center", justifyContent:"center",
+                          background:sel?"#1a237e":"#f5f5f5", borderRight:`1px solid ${sel?"#1a237e":"#ddd"}` }}>
+                          <span style={{ fontWeight:800, fontSize:14, color:sel?"white":"#555" }}>{lbl}</span>
+                        </div>
+                        <div style={{ flex:1, padding:"4px 8px" }}>
+                          {imgData
+                            ? <img src={`data:image/png;base64,${imgData}`} alt={`Option ${lbl}`} style={{ maxWidth:"100%", height:"auto", display:"block" }} />
+                            : <span style={{ fontSize:13, color:"#888", display:"block", padding:"8px 4px" }}>Option {lbl}</span>
+                          }
+                        </div>
                       </div>
-                      <span style={{ fontSize:14, color:"#212121", fontFamily:"Georgia, serif", lineHeight:1.6 }}>
-                        {renderQuestionText(opt, true, cur.figurePageNumber, cur.figureImageData)}
-                      </span>
+                    );
+                  })
+                ) : cur.optionImages?.ALL ? (
+                  /* All options in one image block — show image + tap-to-select A/B/C/D */
+                  <div>
+                    <div style={{ background:"white", borderRadius:8, border:"1px solid #e0e0e0", overflow:"hidden", marginBottom:10 }}>
+                      <img src={`data:image/png;base64,${cur.optionImages.ALL}`} alt="Options" style={{ maxWidth:"100%", display:"block" }} />
                     </div>
-                  );
-                })}
+                    <div style={{ display:"flex", gap:10, justifyContent:"center" }}>
+                      {["A","B","C","D"].map((lbl,oi) => {
+                        const sel = answers[curGi] === oi;
+                        return (
+                          <button key={oi} onClick={() => setAnswers(p => ({...p,[curGi]:oi}))}
+                            style={{ width:52, height:52, borderRadius:"50%", border:`2px solid ${sel?"#1a237e":"#bbb"}`,
+                              background:sel?"#1a237e":"white", color:sel?"white":"#555",
+                              fontWeight:800, fontSize:16, cursor:"pointer" }}>
+                            {lbl}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ) : (
+                  /* Fallback: text options (for demo questions or when images failed) */
+                  (cur.options||[]).map((opt, oi) => {
+                    const sel = answers[curGi] === oi;
+                    return (
+                      <div key={oi} onClick={() => setAnswers(p => ({...p,[curGi]:oi}))}
+                        style={{ padding:"13px 18px", borderRadius:6, border:`2px solid ${sel?"#1a237e":"#ddd"}`,
+                          background:sel?"#e8eaf6":"white", cursor:"pointer",
+                          display:"flex", gap:14, alignItems:"center", transition:"all 0.1s",
+                          boxShadow:sel?"0 0 0 1px #1a237e":"0 1px 2px rgba(0,0,0,0.04)" }}>
+                        <div style={{ width:30, height:30, borderRadius:"50%",
+                          background:sel?"#1a237e":"white", color:sel?"white":"#555",
+                          border:`2px solid ${sel?"#1a237e":"#bbb"}`,
+                          display:"flex", alignItems:"center", justifyContent:"center",
+                          fontWeight:800, fontSize:13, flexShrink:0 }}>
+                          {["A","B","C","D"][oi]}
+                        </div>
+                        <span style={{ fontSize:14, color:"#212121", fontFamily:"Georgia, serif", lineHeight:1.6 }}>
+                          {opt}
+                        </span>
+                      </div>
+                    );
+                  })
+                )}
               </div>
             ) : (
+              /* INTEGER TYPE — Virtual Keypad (NTA-style) */
               <div style={{ background:"white", borderRadius:8, border:"1px solid #e0e0e0", padding:"20px 24px" }}>
-                <div style={{ fontSize:13, color:"#1a237e", fontWeight:700, marginBottom:16 }}>
-                  📝 Numerical Answer Type — Enter Integer Value:
+                <div style={{ fontSize:13, color:"#1a237e", fontWeight:700, marginBottom:14 }}>
+                  🔢 Numerical Answer Type — Enter your answer:
                 </div>
-                <div style={{ display:"flex", alignItems:"center", gap:16 }}>
-                  <input
-                    type="number"
-                    value={intInputs[curGi] !== undefined ? intInputs[curGi] : ""}
-                    onChange={e => setIntInputs(p => ({ ...p, [curGi]: e.target.value }))}
-                    onWheel={e => e.target.blur()}
-                    placeholder="0"
-                    style={{ padding:"16px 20px", borderRadius:6, border:"2px solid #1a237e", fontSize:28, fontWeight:700,
-                      width:220, outline:"none", textAlign:"center", display:"block",
-                      background:"#f8f9ff", boxSizing:"border-box", fontFamily:"Arial, sans-serif",
-                      color:"#1a237e" }}
-                  />
-                  {intInputs[curGi] !== undefined && intInputs[curGi] !== "" && (
-                    <div style={{ background:"#e8f5e9", border:"1px solid #a5d6a7", borderRadius:8, padding:"8px 16px", fontSize:14, color:"#2e7d32", fontWeight:700 }}>
-                      ✅ Answer: {intInputs[curGi]}
+
+                {/* Display box */}
+                <div style={{ background:"#f8f9ff", border:"2px solid #1a237e", borderRadius:6, padding:"14px 20px",
+                  fontSize:32, fontWeight:700, color:"#1a237e", textAlign:"center", marginBottom:16,
+                  minHeight:60, letterSpacing:2, fontFamily:"monospace" }}>
+                  {intInputs[curGi] !== undefined && intInputs[curGi] !== "" ? intInputs[curGi] : <span style={{color:"#ccc"}}>—</span>}
+                </div>
+
+                {/* Virtual Keypad */}
+                {(() => {
+                  const cur_val = String(intInputs[curGi] ?? "");
+                  const appendDigit = (d) => {
+                    const newVal = cur_val === "" || cur_val === "-" ? (cur_val + d) : (cur_val + d);
+                    setIntInputs(p => ({...p, [curGi]: newVal}));
+                  };
+                  const backspace = () => {
+                    const newVal = cur_val.slice(0, -1);
+                    setIntInputs(p => ({...p, [curGi]: newVal || ""}));
+                  };
+                  const toggleSign = () => {
+                    if (cur_val.startsWith("-")) setIntInputs(p => ({...p,[curGi]:cur_val.slice(1)}));
+                    else if (cur_val) setIntInputs(p => ({...p,[curGi]:"-"+cur_val}));
+                  };
+                  const dot = () => {
+                    if (!cur_val.includes(".")) setIntInputs(p => ({...p,[curGi]:cur_val+"."}));
+                  };
+                  const btnStyle = (color="#1a237e") => ({
+                    padding:"14px 0", borderRadius:6, border:`1px solid ${color}22`,
+                    background:color==="#1a237e"?"#e8eaf6":color==="red"?"#ffebee":"#f5f5f5",
+                    color:color==="red"?"#c62828":color==="#1a237e"?"#1a237e":"#333",
+                    fontWeight:700, fontSize:18, cursor:"pointer", fontFamily:"monospace",
+                    transition:"all 0.1s", width:"100%"
+                  });
+                  return (
+                    <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:8 }}>
+                      {[7,8,9].map(d=><button key={d} onClick={()=>appendDigit(String(d))} style={btnStyle()}>{d}</button>)}
+                      <button onClick={backspace} style={btnStyle("red")}>⌫</button>
+                      {[4,5,6].map(d=><button key={d} onClick={()=>appendDigit(String(d))} style={btnStyle()}>{d}</button>)}
+                      <button onClick={toggleSign} style={btnStyle("#555")}>+/−</button>
+                      {[1,2,3].map(d=><button key={d} onClick={()=>appendDigit(String(d))} style={btnStyle()}>{d}</button>)}
+                      <button onClick={dot} style={btnStyle("#555")}>.</button>
+                      <button onClick={()=>appendDigit("0")} style={{...btnStyle(),gridColumn:"1/3"}}>0</button>
+                      <button onClick={()=>setIntInputs(p=>({...p,[curGi]:""})) } style={{...btnStyle("red"),gridColumn:"3/5"}}>CLEAR</button>
                     </div>
-                  )}
-                </div>
-                <div style={{ fontSize:12, color:"#888", marginTop:10 }}>
-                  Enter integer only. Use CLEAR RESPONSE button to reset.
-                </div>
+                  );
+                })()}
               </div>
             )}
           </div>
@@ -3280,22 +3372,29 @@ function ResultsScreen({ test, student, submission, onBack }) {
                       <span style={{ fontSize:11, color:subColor, background:subColor+"18", padding:"2px 8px", borderRadius:99, fontWeight:600 }}>{sub}</span>
                       <span style={{ fontSize:11, color:DS.textMuted }}>{q.type?.toUpperCase()}</span>
                     </div>
-                    <div style={{ fontSize:14, color:DS.text, lineHeight:1.6, marginBottom:q.options?.length?10:0 }}>
-                      {renderQuestionText(q.text, true, q.figurePageNumber, q.figureImageData)}
+                    <div style={{ fontSize:14, color:DS.text, lineHeight:1.6, marginBottom:6 }}>
+                      {q.questionImageData
+                        ? <img src={`data:image/png;base64,${q.questionImageData}`} alt={`Q${i+1}`} style={{ maxWidth:"100%", display:"block", borderRadius:6, border:"1px solid #eee" }} />
+                        : <span style={{ fontFamily:"Georgia, serif" }}>{q.text || `Question ${i+1}`}</span>
+                      }
                     </div>
-                    {q.options?.length > 0 && (
+                    {q.type === "mcq" && (
                       <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:6, marginBottom:8 }}>
-                        {q.options.map((opt, oi) => {
+                        {["A","B","C","D"].map((lbl, oi) => {
                           const isCorrect = oi === q.correct;
                           const isChosen = String(r.given) === String(oi);
+                          const optImg = q.optionImages?.[lbl];
                           return (
-                            <div key={oi} style={{ padding:"7px 12px", borderRadius:7, fontSize:13,
+                            <div key={oi} style={{ padding: optImg ? "4px 8px" : "7px 12px", borderRadius:7, fontSize:13,
                               background: isCorrect ? "#dcfce7" : isChosen&&!isCorrect ? "#fee2e2" : "#f9fafb",
                               border: `1px solid ${isCorrect ? "#86efac" : isChosen&&!isCorrect ? "#fca5a5" : DS.border}`,
                               color: isCorrect ? "#15803d" : isChosen&&!isCorrect ? "#b91c1c" : DS.textMid,
                               fontWeight: isCorrect||isChosen ? 600 : 400 }}>
-                              <span style={{ fontWeight:700, marginRight:6 }}>{["A","B","C","D"][oi]}.</span>
-                              {renderQuestionText(opt, true, q.figurePageNumber, q.figureImageData)}
+                              <span style={{ fontWeight:700, marginRight:6 }}>{lbl}.</span>
+                              {optImg
+                                ? <img src={`data:image/png;base64,${optImg}`} alt={`Opt ${lbl}`} style={{ maxWidth:"100%", verticalAlign:"middle" }} />
+                                : <span>{(q.options||[])[oi] || lbl}</span>
+                              }
                             </div>
                           );
                         })}
