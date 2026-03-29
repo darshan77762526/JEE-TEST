@@ -1644,11 +1644,23 @@ async function embedFigureImages(questions, pdfBase64, onProgress) {
   const setMsg = (msg, type = "info") => { setStatus(msg); setStatusType(type); };
 
   const normalizeQs = (qs) => qs.map((q, idx) => {
-    let type = q.type;
-    if (!q.optionRegions && (!q.options || q.options.length === 0)) type = "integer";
-    if (q.optionRegions || (q.options && q.options.length > 0)) type = "mcq";
-    // If type still not set, default based on Gemini output
-    if (!type) type = q.type || "mcq";
+    let type = q.type; // Trust Gemini's type field first
+
+    // Only override type if Gemini didn't provide one
+    if (!type) {
+      // Infer from structure
+      if (q.optionRegions || q.optionsRegion || (q.options && q.options.length > 0)) {
+        type = "mcq";
+      } else {
+        type = "integer";
+      }
+    }
+
+    // Sanity-check: if Gemini said "integer" but there are optionRegions/optionsRegion, trust the regions
+    if (type === "integer" && (q.optionRegions || q.optionsRegion)) {
+      type = "mcq";
+    }
+
     return {
       ...q,
       id: q.id || (idx + 1),
@@ -1659,6 +1671,7 @@ async function embedFigureImages(questions, pdfBase64, onProgress) {
       // preserve new crop fields
       page: q.page || null,
       questionRegion: q.questionRegion || null,
+      optionsRegion: q.optionsRegion || null,
       optionRegions: q.optionRegions || null,
     };
   });
@@ -1781,9 +1794,12 @@ async function embedFigureImages(questions, pdfBase64, onProgress) {
           const parsed = await parsePDF(paperB64, false, savedModel);
           if (parsed?.questions?.length) {
             questions = parsed.questions.map((q, idx) => {
-              let type = q.type;
-              if (!q.options || q.options.length === 0) type = "integer";
-              if (q.options && q.options.length > 0) type = "mcq";
+              let type = q.type; // Trust Gemini's type field first
+              if (!type) {
+                if (q.optionRegions || q.optionsRegion || (q.options && q.options.length > 0)) type = "mcq";
+                else type = "integer";
+              }
+              if (type === "integer" && (q.optionRegions || q.optionsRegion)) type = "mcq";
               return { ...q, id: q.id || (idx + 1), type, options: type === "mcq" ? (q.options || []) : [], marks: Number(q.marks) || 4, negative: q.negative !== undefined ? Number(q.negative) : (type === "mcq" ? -1 : 0) };
             });
             geminiUsed = true;
